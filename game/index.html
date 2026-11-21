@@ -1,8 +1,59 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Little Elsewhere — a game of second glances</title><link rel="icon" href="data:,"><link rel="stylesheet" href="./style.css"></head>
-<body><header><a class="brand" href="./">little elsewhere<span>THE ART OF NOTICING</span></a><div class="header-note">A small escape. A closer look.</div><nav><button id="sound" title="Toggle sound (N)">Sound on</button><button id="music">Music off</button><button id="pause">Ⅱ Pause</button></nav></header>
-<main><section class="scene-heading"><div><span class="eyebrow" id="chapter">POSTCARD 01 / 05</span><h1 id="scene-name">The quiet harbour</h1><p id="caption">Where the day drifts away, one little detail at a time.</p></div><div class="remaining"><strong id="remaining">7 left</strong><span id="found">0 OF 7 DISCOVERED</span></div></section>
-<section class="toolbar"><div><span class="stat-label">TIME</span><b id="time">00:00</b></div><div><span class="stat-label">MISTAKES</span><b id="mistakes">0</b></div><div><span class="stat-label">SCORE</span><b id="score">0</b></div><div class="progress" id="progress"></div><button id="hint">✧ A little hint <span id="hints">3</span><kbd>H</kbd></button></section>
-<section class="pictures"><article><div class="picture-label"><span>01 — THE ORIGINAL</span><span>Look a little closer</span></div><canvas id="original" width="600" height="440" tabindex="0" aria-label="Original picture. Use arrows or WASD and Space to find differences."></canvas></article><article><div class="picture-label"><span>02 — THE OTHER VERSION</span><span>Seven things have changed</span></div><canvas id="altered" width="600" height="440" tabindex="0" aria-label="Altered picture. Click a changed detail."></canvas></article></section>
-<footer><span>Find the differences in either picture. Take your time.</span><span><kbd>W A S D</kbd> move <kbd>SPACE</kbd> check <kbd>H</kbd> hint <kbd>P</kbd> pause <kbd>N</kbd> sound</span></footer><p id="status" role="status" aria-live="polite">Welcome to Little Elsewhere.</p></main>
-<div id="overlay"><section class="card" id="card"></section></div><script type="module" src="./src/main.js"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Little Elsewhere — a game of second glances</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header>
+    <a class="brand" href="./">little elsewhere<span>THE ART OF NOTICING</span></a>
+    <div class="header-note">A small escape. A closer look.</div>
+    <nav>
+      <button id="sound" title="Toggle sound (N)">Sound on</button>
+      <button id="music">Music off</button>
+      <button id="pause">Ⅱ Pause</button>
+    </nav>
+  </header>
+  <main>
+    <section class="scene-heading">
+      <div>
+        <span class="eyebrow" id="chapter">POSTCARD 01 / 06</span>
+        <h1 id="scene-name">The quiet harbour</h1>
+        <p id="caption">Where the day drifts away, one little detail at a time.</p>
+      </div>
+      <div class="remaining">
+        <strong id="remaining">7 left</strong>
+        <span id="found">0 OF 7 DISCOVERED</span>
+      </div>
+    </section>
+    <section class="toolbar">
+      <div><span class="stat-label">TIME</span><b id="time">00:00</b></div>
+      <div><span class="stat-label">MISTAKES</span><b id="mistakes">0</b></div>
+      <div><span class="stat-label">STREAK</span><b id="streak">—</b></div>
+      <div><span class="stat-label">SCORE</span><b id="score">0</b></div>
+      <div class="progress" id="progress"></div>
+      <button id="hint">✧ A little hint <span id="hints">3</span><kbd>H</kbd></button>
+    </section>
+    <section class="pictures">
+      <article>
+        <div class="picture-label"><span>01 — THE ORIGINAL</span><span>Look a little closer</span></div>
+        <canvas id="original" width="600" height="440" tabindex="0" aria-label="Original picture. Use arrows or WASD and Space to find differences."></canvas>
+      </article>
+      <article>
+        <div class="picture-label"><span>02 — THE OTHER VERSION</span><span>Seven things have changed</span></div>
+        <canvas id="altered" width="600" height="440" tabindex="0" aria-label="Altered picture. Click a changed detail."></canvas>
+      </article>
+    </section>
+    <footer>
+      <span>Find the differences in either picture. Take your time.</span>
+      <span><kbd>W A S D</kbd> move <kbd>SPACE</kbd> check <kbd>H</kbd> hint <kbd>P</kbd> pause <kbd>N</kbd> sound</span>
+    </footer>
+    <p id="status" role="status" aria-live="polite">Welcome to Little Elsewhere.</p>
+  </main>
+  <div id="overlay"><section class="card" id="card"></section></div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
