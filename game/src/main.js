@@ -1,134 +1,39 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
-
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
-
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
-
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
+import { scenes, drawScene } from './scenes.js';
+const $=id=>document.getElementById(id), params=new URLSearchParams(location.search),shot=params.get('shot');
+let seed=Number(params.get('seed')||Date.now())>>>0;
+function random(){seed+=0x6d2b79f5;let t=seed;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296;}
+const canvases=[$('original'),$('altered')],ctxs=canvases.map(c=>c.getContext('2d'));
+const state={screen:'title',level:0,selected:[],found:[],elapsed:0,mistakes:0,hints:3,score:0,total:0,cursor:{x:300,y:220,visible:false},hint:null,miss:null,lock:0};
+let best=0,sound=true,music=false,audio=null,note=0,lastMusic=0,misses=[],keys=new Set(),layers=[];
+try{best=Number(localStorage.getItem('little-elsewhere-best'))||0;}catch{}
+function tone(f,d=.15,volume=.06,type='sine',delay=0){if(!audio)return;const o=audio.createOscillator(),g=audio.createGain(),t=audio.currentTime+delay;o.type=type;o.frequency.value=f;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(volume,t+.015);g.gain.exponentialRampToValueAtTime(.001,t+d);o.connect(g);g.connect(audio.destination);o.start(t);o.stop(t+d+.02);}
+function wake(){if(!audio){const Audio=window.AudioContext||window.webkitAudioContext;if(Audio)audio=new Audio();}if(audio?.state==='suspended')audio.resume();}
+function announce(t){$('status').textContent=t;}
+function time(v){return `${String(Math.floor(v/60)).padStart(2,'0')}:${String(Math.floor(v%60)).padStart(2,'0')}`;}
+function update(){let s=scenes[state.level];$('chapter').textContent=`POSTCARD ${String(state.level+1).padStart(2,'0')} / 05`;$('scene-name').textContent=s.name;$('caption').textContent=s.caption;$('remaining').textContent=`${7-state.found.length} left`;$('found').textContent=`${state.found.length} OF 7 DISCOVERED`;$('time').textContent=time(state.elapsed);$('mistakes').textContent=state.mistakes;$('score').textContent=(state.total+state.score).toLocaleString();$('hints').textContent=state.hints;$('hint').disabled=state.hints===0||state.screen!=='playing';$('progress').innerHTML=Array.from({length:7},(_,i)=>`<i class="${i<state.found.length?'done':''}"></i>`).join('');}
+function prepare(level){state.level=level;state.selected=scenes[level].objects.map(o=>o.id);for(let i=11;i>0;i--){let j=Math.floor(random()*(i+1));[state.selected[i],state.selected[j]]=[state.selected[j],state.selected[i]];}state.selected=state.selected.slice(0,7);Object.assign(state,{found:[],elapsed:0,mistakes:0,hints:3,score:0,hint:null,miss:null,lock:0});misses=[];layers=[0,1].map(a=>{let c=document.createElement('canvas');c.width=1200;c.height=880;let x=c.getContext('2d');x.scale(2,2);drawScene(x,scenes[level],state.selected,!!a);return c;});update();}
+function overlay(screen){state.screen=screen;keys.clear();$('overlay').classList.toggle('hidden',screen==='playing');$('pause').disabled=screen==='title'||screen==='complete'||screen==='final';let card=$('card');
+ if(screen==='title')card.innerHTML='<div class="seal">◎</div><span class="eyebrow">FIVE PLACES. THIRTY-FIVE LITTLE SECRETS.</span><h2>See the little<br>things differently.</h2><p>Welcome to <em>Little Elsewhere.</em><br>Explore five hand-drawn worlds. Find seven changes<br>in each pair of pictures. No rush. Just a closer look.</p><button class="primary" id="continue">Begin exploring →</button><p>Click a changed detail in either picture.</p><div class="instructions"><kbd>↑ ↓ ← →</kbd> or <kbd>W A S D</kbd> move · <kbd>SHIFT</kbd> faster<br><kbd>SPACE / ENTER</kbd> check · <kbd>H</kbd> hint · <kbd>P / ESC</kbd> pause<br><kbd>M</kbd> music · <kbd>N</kbd> sound</div>';
+ if(screen==='paused')card.innerHTML='<div class="seal">Ⅱ</div><span class="eyebrow">A MOMENT TO YOURSELF</span><h2>The world can wait.</h2><p>Your discoveries are safe.<br>Come back whenever you’re ready.</p><button class="primary" id="continue">Keep looking →</button><div class="instructions">Press P, Esc, Enter or Space to resume.</div>';
+ if(screen==='complete'||screen==='final'){let final=screen==='final',stars=state.mistakes<2&&state.hints>=2?3:state.mistakes<5?2:1;card.innerHTML=`<div class="stars">${'★'.repeat(stars)}${'☆'.repeat(3-stars)}</div><span class="eyebrow">${final?'YOUR COLLECTION IS COMPLETE':'POSTCARD DISCOVERED'}</span><h2>${final?'A wonderful eye.':'Beautifully noticed.'}</h2><p>${final?'Five worlds, thirty-five discoveries. Thank you for slowing down.':scenes[state.level].name+' has shared all its secrets.'}</p><div class="result-stats"><div><b>${time(state.elapsed)}</b><span>TIME</span></div><div><b>${state.mistakes}</b><span>MISTAKES</span></div><div><b>${final?state.total+state.score:state.score}</b><span>${final?'TOTAL SCORE':'POSTCARD SCORE'}</span></div></div>${final?`<p>Personal best · ${best.toLocaleString()}</p>`:''}<button class="primary" id="continue">${final?'Explore again':state.level===4?'View collection':'Next postcard'} →</button><div class="instructions">${final?'Every visit reveals a new selection of details.':`${state.level+1} of 5 postcards collected · Enter to continue`}</div>`;}
+ $('continue')?.addEventListener('click',confirm);update();
 }
-
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
-}
-
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
-    }
-    renderer.draw(world.state, screen, best);
-  }
-
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Block Dodger. Press Space or click to start.');
-  requestAnimationFrame(frame);
-}
-
-if (shot) runShot(shot);
-else runGame();
+function confirm(){wake();if(state.screen==='title'||state.screen==='final'){state.total=0;prepare(0);overlay('playing');announce('Seven differences to discover.');}else if(state.screen==='paused')overlay('playing');else if(state.screen==='complete'){if(state.level===4){best=Math.max(best,state.total+state.score);try{localStorage.setItem('little-elsewhere-best',String(best));}catch{}overlay('final');}else{state.total+=state.score;prepare(state.level+1);overlay('playing');}}}
+function check(x,y){if(state.screen!=='playing'||state.lock>0)return;wake();let target=scenes[state.level].objects.find(o=>state.selected.includes(o.id)&&((x-o.x)/(o.r+13))**2+((y-(o.y-8))/(o.r+25))**2<=1);if(target){if(state.found.some(f=>f.id===target.id))return;state.found.push({id:target.id,at:performance.now()});state.score+=Math.max(150,500-Math.floor(state.elapsed)*2-state.mistakes*20);if(sound){tone(659);tone(880,.3,.05,'sine',.09);}announce(`Found! ${7-state.found.length} differences remaining.`);if(state.found.length===7){state.score+=state.hints*100;overlay('complete');}}else{state.mistakes++;state.elapsed+=5;state.score=Math.max(0,state.score-50);state.miss={x,y,life:1.1};misses=misses.filter(t=>performance.now()-t<1600);misses.push(performance.now());if(misses.length>=3){state.lock=2;announce('Take a breath. Clicks paused for two seconds.');}else announce('Not quite. Five seconds added.');if(sound)tone(155,.18,.05,'triangle');}update();}
+function hint(){if(state.screen!=='playing'||!state.hints)return;wake();const o=scenes[state.level].objects.find(o=>state.selected.includes(o.id)&&!state.found.some(f=>f.id===o.id));if(!o)return;state.hints--;state.hint={id:o.id,life:4};announce(`A hint is glowing. ${state.hints} hints left.`);if(sound)tone(523,.4,.04);update();}
+function pause(){if(state.screen==='playing')overlay('paused');else if(state.screen==='paused')overlay('playing');}
+$('hint').onclick=hint;$('pause').onclick=pause;
+function toggleSound(){sound=!sound;$('sound').textContent=`Sound ${sound?'on':'off'}`;}
+function toggleMusic(){wake();music=!music;$('music').textContent=`Music ${music?'on':'off'}`;}
+$('sound').onclick=toggleSound;$('music').onclick=toggleMusic;
+canvases.forEach(c=>{function position(e){const r=c.getBoundingClientRect();state.cursor={x:(e.clientX-r.left)/r.width*600,y:(e.clientY-r.top)/r.height*440,visible:true};}c.addEventListener('pointermove',position);c.addEventListener('pointerdown',e=>{position(e);c.focus();check(state.cursor.x,state.cursor.y);});});
+document.addEventListener('keydown',e=>{if(e.target.tagName==='BUTTON'&&(e.key==='Enter'||e.key===' '))return;const k=e.key.toLowerCase();if(['arrowup','arrowdown','arrowleft','arrowright',' ','enter','escape'].includes(k))e.preventDefault();keys.add(k);if(e.repeat)return;if(k==='m')toggleMusic();else if(k==='n')toggleSound();if(k==='h')hint();if(k==='p'||k==='escape')pause();if(k===' '||k==='enter'){if(state.screen==='playing')check(state.cursor.x,state.cursor.y);else confirm();}});
+document.addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
+window.addEventListener('blur',()=>{keys.clear();if(state.screen==='playing'&&!shot)overlay('paused');});document.addEventListener('visibilitychange',()=>{if(document.hidden&&state.screen==='playing'&&!shot)overlay('paused');});
+function ring(c,x,y,r,col){c.lineWidth=2.5;c.strokeStyle=col;c.beginPath();c.arc(x,y,r,0,Math.PI*2);c.stroke();}
+function render(now){ctxs.forEach((c,i)=>{const canvas=canvases[i],r=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1,w=Math.round(r.width*dpr),h=Math.round(r.height*dpr);if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}c.setTransform(w/600,0,0,h/440,0,0);c.drawImage(layers[i],0,0,600,440);state.found.forEach(f=>{let o=scenes[state.level].objects[f.id],pulse=shot?0:Math.max(0,1-(now-f.at)/450)*8;ring(c,o.x,o.y-6,o.r+15+pulse,'#fff7d9');ring(c,o.x,o.y-6,o.r+12+pulse,'#2d6b57');c.fillStyle='#2d6b57';c.beginPath();c.arc(o.x+o.r+6,o.y-o.r-5,7,0,7);c.fill();c.fillStyle='white';c.font='10px Arial';c.textAlign='center';c.fillText('✓',o.x+o.r+6,o.y-o.r-2);});if(state.hint){let o=scenes[state.level].objects[state.hint.id];ring(c,o.x,o.y-8,o.r+24+Math.sin(now/220)*5,'#ffe7a0');ring(c,o.x,o.y-8,o.r+28+Math.sin(now/220)*5,'#f4cf7199');}if(state.miss){let {x,y}=state.miss;c.strokeStyle='#c7544b';c.lineWidth=3;c.beginPath();c.moveTo(x-9,y-9);c.lineTo(x+9,y+9);c.moveTo(x+9,y-9);c.lineTo(x-9,y+9);c.stroke();}if(state.cursor.visible&&state.screen==='playing'){let {x,y}=state.cursor;c.strokeStyle='#fff9';c.lineWidth=4;c.beginPath();c.arc(x,y,9,0,7);c.stroke();ring(c,x,y,9,'#284e49');c.strokeStyle='#284e49';c.lineWidth=1;for(let a=0;a<4;a++){c.save();c.translate(x,y);c.rotate(a*Math.PI/2);c.beginPath();c.moveTo(5,0);c.lineTo(15,0);c.stroke();c.restore();}}if(state.lock>0){c.fillStyle='#244a4688';c.fillRect(0,0,600,440);c.fillStyle='#fff';c.font='19px Georgia';c.textAlign='center';c.fillText('A breath. A second glance.',300,220);}});}
+prepare(0);overlay('title');
+if(shot){if(shot==='play'||shot==='hint'||shot==='complete'){prepare(shot==='hint'?3:0);overlay('playing');const count=shot==='complete'?7:shot==='play'?4:2;state.found=state.selected.slice(0,count).map(id=>({id,at:0}));state.elapsed=shot==='complete'?104:76;state.score=count*420;state.cursor={x:365,y:270,visible:true};if(shot==='hint'){state.hints=2;state.hint={id:state.selected[2],life:99};state.miss={x:325,y:240,life:99};state.mistakes=1;}if(shot==='complete')overlay('complete');update();}requestAnimationFrame(()=>{render(800);requestAnimationFrame(()=>{render(800);window.__shotReady=true;});});}
+let previous=performance.now();function frame(now){let dt=Math.min(.05,(now-previous)/1000);previous=now;if(!shot){if(state.screen==='playing'){state.elapsed+=dt;state.lock=Math.max(0,state.lock-dt);for(let prop of ['hint','miss'])if(state[prop]){state[prop].life-=dt;if(state[prop].life<=0)state[prop]=null;}let dx=(keys.has('arrowright')||keys.has('d')?1:0)-(keys.has('arrowleft')||keys.has('a')?1:0),dy=(keys.has('arrowdown')||keys.has('s')?1:0)-(keys.has('arrowup')||keys.has('w')?1:0);if(dx||dy){state.cursor.visible=true;let speed=keys.has('shift')?260:110;state.cursor.x=Math.max(0,Math.min(600,state.cursor.x+dx*speed*dt));state.cursor.y=Math.max(0,Math.min(440,state.cursor.y+dy*speed*dt));} $('time').textContent=time(state.elapsed);}if(music&&audio&&state.screen==='playing'&&now-lastMusic>480){lastMusic=now;const notes=[261.63,329.63,392,493.88,440,392,329.63,293.66];tone(notes[note++%8]/2,.8,.018);tone(notes[(note+2)%8],.7,.012);}render(now);}requestAnimationFrame(frame);}requestAnimationFrame(frame);
+// Read-only test surface: no action shortcuts or answer overlays in the game.
+window.__game={get state(){return JSON.parse(JSON.stringify(state));},get differences(){return scenes[state.level].objects.filter(o=>state.selected.includes(o.id)).map(o=>({...o}));}};
