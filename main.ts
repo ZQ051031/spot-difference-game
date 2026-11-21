@@ -1,41 +1,87 @@
-// A working best-game-01 entry (Node 22, standard library only): the game is this directory's
-// game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
-// modules, no library and no network request), and the program hands it in. It copies game/ and
-// screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
-// judge reads, with the vendored make.fun library. A starting point, not a winner: Block Dodger, a
-// plain 2D canvas game where a paddle dodges falling blocks and catches coins, with a title screen,
-// score, lives and levels, game over and restart, flat colours and no sound. Build your own game
-// (any genre, any library you vendor under game/, or none), put your 3 or 4 PNG or JPEG screenshots
-// in screenshots/ (the first by name is the cover) and run it.
+// Little Elsewhere — the entrypoint that hands the game to the judge.
 //
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// The game itself is plain static files under game/ (index.html plus its
+// ES modules, no libraries, no network). This program gathers those files
+// and the screenshots/ pictures into the output directory and writes the
+// dossier.json summary the judge reads, using the vendored make.fun
+// library. It also checks its own work before finishing: the game folder
+// must be present, the screenshots must fit the scorer's caps, and the
+// dossier it just wrote must parse and describe exactly what was copied.
+// A stale file left in the output from an earlier run is cleared first,
+// so the entry never ships a picture or script it no longer contains.
+//
+// Run it outside the grader with MAKEFUN_OUTPUT_DIR standing in for
+// /output:  mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const sourceDir = fileURLToPath(new URL('.', import.meta.url));
+const destination = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const MAX_SHOTS = 4;
+const MAX_SHOT_BYTES = 262144;
 
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+function fail(message) {
+  throw new Error(`main.ts: ${message}`);
+}
 
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
-// scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
-// files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
-// screenshots/ and dossier.json).
+function mustExist(path, what) {
+  if (!existsSync(path)) fail(`${what} is missing (${path})`);
+}
+
+// The game folder is the entry: without it there is nothing to judge.
+mustExist(join(sourceDir, 'game'), 'game/');
+mustExist(join(sourceDir, 'game', 'index.html'), 'game/index.html');
+
+// Clear anything a previous run left behind, then copy fresh.
+mkdirSync(destination, { recursive: true });
+for (const sub of ['game', 'screenshots']) rmSync(join(destination, sub), { recursive: true, force: true });
+cpSync(join(sourceDir, 'game'), join(destination, 'game'), { recursive: true });
+
+// Screenshots are optional, but when present they must fit the caps the
+// scorer enforces (at most four, each no bigger than 256 KiB).
+const shotDir = join(sourceDir, 'screenshots');
+const shotNames = existsSync(shotDir)
+  ? readdirSync(shotDir).filter(name => /\.(png|jpe?g)$/i.test(name)).sort()
+  : [];
+if (shotNames.length > MAX_SHOTS) fail(`found ${shotNames.length} screenshots, the cap is ${MAX_SHOTS}`);
+for (const name of shotNames) {
+  const size = statSync(join(shotDir, name)).size;
+  if (size > MAX_SHOT_BYTES) fail(`screenshots/${name} is ${size} bytes, over the ${MAX_SHOT_BYTES} cap`);
+}
+mkdirSync(join(destination, 'screenshots'), { recursive: true });
+if (shotNames.length) cpSync(shotDir, join(destination, 'screenshots'), { recursive: true });
+
+// The scorer's own caps (reference/gate.json): only text_max_bytes shapes
+// the bytes; the rest refuse an entry the scorer would refuse (more than
+// four screenshots or one over 256 KiB; more than 993 files in game/ or
+// 48 MiB of game files in all, or a path under game/ over 1000 bytes).
+const dossierPath = join(destination, 'dossier.json');
 writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
+  dossierPath,
+  buildDossier(destination, {
     text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
+    screenshots: { max: MAX_SHOTS, max_bytes: MAX_SHOT_BYTES },
     game_max_files: 993,
     game_max_bytes: 50331648,
     game_path_max_bytes: 1000,
   }),
 );
+
+// Read the dossier back and confirm it describes what was actually copied.
+let dossier;
+try {
+  dossier = JSON.parse(readFileSync(dossierPath, 'utf8'));
+} catch {
+  fail('dossier.json did not parse after writing');
+}
+for (const key of ['cover', 'images', 'schema', 'text']) {
+  if (!(key in dossier)) fail(`dossier.json is missing its "${key}" field`);
+}
+if (!Array.isArray(dossier.images) || dossier.images.length !== shotNames.length) {
+  fail(`dossier.json lists ${dossier.images?.length ?? 0} images but ${shotNames.length} screenshots were copied`);
+}
+const gameFiles = readdirSync(join(destination, 'game'), { recursive: true });
+console.log(`entry ready: ${gameFiles.length} game entries, ${shotNames.length} screenshots, dossier ${statSync(dossierPath).size} bytes -> ${destination}`);

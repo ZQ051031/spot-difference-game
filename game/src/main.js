@@ -1,544 +1,625 @@
-// Little Elsewhere — game logic.
-// Six hand-drawn postcards. Find seven differences in each pair.
+// Little Elsewhere — the game engine, rewritten.
+// Six hand-drawn postcards; spot seven changes in each pair.
 // Keyboard and mouse. No network, no build step.
 import { scenes, drawScene, pickDifferences, zoneOf } from './scenes.js';
 
-const LEVELS = scenes.length; // 6
-const PER_LEVEL = 7;
+const POSTCARD_COUNT = scenes.length; // 6
+const PER_POSTCARD = 7;
 const BEST_KEY = 'little-elsewhere-best';
 const UNLOCKED_KEY = 'little-elsewhere-unlocked';
+const PIC_W = 600;
+const PIC_H = 440;
 
-const $ = id => document.getElementById(id);
-const params = new URLSearchParams(location.search);
-const shot = params.get('shot');
+const el = id => document.getElementById(id);
+const query = new URLSearchParams(location.search);
+const shotMode = query.get('shot');
 
 // Seeded random: a fixed seed makes replays and screenshots reproducible.
-let seed = Number(params.get('seed') || Date.now()) >>> 0;
-function random() {
-  seed += 0x6d2b79f5;
-  let t = seed;
-  t = Math.imul(t ^ (t >>> 15), t | 1);
-  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+let rngState = (Number(query.get('seed')) || Date.now()) >>> 0;
+function nextRand() {
+  rngState = (rngState + 0x6d2b79f5) >>> 0;
+  let a = rngState;
+  a = Math.imul(a ^ (a >>> 15), a | 1);
+  a = a ^ (a + Math.imul(a ^ (a >>> 7), a | 61));
+  return ((a ^ (a >>> 14)) >>> 0) / 4294967296;
 }
 
-const canvases = [$('original'), $('altered')];
-const ctxs = canvases.map(c => c.getContext('2d'));
-
-const state = {
-  screen: 'title',
-  level: 0,
-  selected: [],
-  found: [],
-  elapsed: 0,
-  mistakes: 0,
-  hints: 3,
-  score: 0,
-  total: 0,
-  streak: 0,          // consecutive finds without a miss
-  bestStreak: 0,
-  lastFindAt: 0,
-  cursor: { x: 300, y: 220, visible: false },
-  hint: null,         // {id, life} — the glowing ring
-  zone: null,         // {label, life} — the quadrant hint
-  miss: null,
-  lock: 0,
-};
-
-let best = 0;
-let unlocked = 0; // highest level index the player may open
-let sound = true;
-let music = false;
-let audio = null;
-let note = 0;
-let lastMusic = 0;
-let misses = [];
-let keys = new Set();
-let layers = [];
-
-try { best = Number(localStorage.getItem(BEST_KEY)) || 0; } catch {}
-try { unlocked = Number(localStorage.getItem(UNLOCKED_KEY)) || 0; } catch {}
-unlocked = Math.max(0, Math.min(LEVELS - 1, unlocked));
-
-function saveUnlocked() {
-  try { localStorage.setItem(UNLOCKED_KEY, String(unlocked)); } catch {}
-}
-function saveBest() {
-  try { localStorage.setItem(BEST_KEY, String(best)); } catch {}
-}
-
-// ---------- audio ----------
-
-function tone(f, d = 0.15, volume = 0.06, type = 'sine', delay = 0) {
-  if (!audio) return;
-  const o = audio.createOscillator();
-  const g = audio.createGain();
-  const t = audio.currentTime + delay;
-  o.type = type;
-  o.frequency.value = f;
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(volume, t + 0.015);
-  g.gain.exponentialRampToValueAtTime(0.001, t + d);
-  o.connect(g);
-  g.connect(audio.destination);
-  o.start(t);
-  o.stop(t + d + 0.02);
-}
-
-function wake() {
-  if (!audio) {
-    const Audio = window.AudioContext || window.webkitAudioContext;
-    if (Audio) audio = new Audio();
-  }
-  if (audio?.state === 'suspended') audio.resume();
-}
-
-// ---------- helpers ----------
-
-function announce(t) { $('status').textContent = t; }
-
-function time(v) {
-  return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(Math.floor(v % 60)).padStart(2, '0')}`;
-}
-
-// Points for a find: a fast, clean find is worth more, and a streak of
-// finds without a miss multiplies it. The formula is shown on the
-// level-complete card so the score is never a mystery.
-function findPoints() {
-  const base = Math.max(150, 500 - Math.floor(state.elapsed) * 2 - state.mistakes * 20);
-  const mult = 1 + 0.25 * Math.min(state.streak, 8);
-  return Math.round(base * mult);
-}
-
-function update() {
-  const s = scenes[state.level];
-  $('chapter').textContent = `POSTCARD ${String(state.level + 1).padStart(2, '0')} / ${String(LEVELS).padStart(2, '0')}`;
-  $('scene-name').textContent = s.name;
-  $('caption').textContent = s.caption;
-  $('remaining').textContent = `${PER_LEVEL - state.found.length} left`;
-  $('found').textContent = `${state.found.length} OF ${PER_LEVEL} DISCOVERED`;
-  $('time').textContent = time(state.elapsed);
-  $('mistakes').textContent = state.mistakes;
-  $('score').textContent = (state.total + state.score).toLocaleString();
-  $('streak').textContent = state.streak > 1 ? `x${state.streak}` : '—';
-  $('hints').textContent = state.hints;
-  $('hint').disabled = state.hints === 0 || state.screen !== 'playing';
-  $('progress').innerHTML = Array.from({ length: PER_LEVEL }, (_, i) =>
-    `<i class="${i < state.found.length ? 'done' : ''}"></i>`).join('');
-}
-
-// ---------- level setup ----------
-
-function prepare(level) {
-  state.level = level;
-  // Spread the seven differences across the picture instead of letting
-  // them clump in one corner.
-  state.selected = pickDifferences(scenes[level], PER_LEVEL, random);
-  Object.assign(state, {
-    found: [], elapsed: 0, mistakes: 0, hints: 3, score: 0,
+function freshState() {
+  return {
+    screen: 'title', level: 0, selected: [], found: [],
+    elapsed: 0, mistakes: 0, hints: 3, score: 0, total: 0,
     streak: 0, bestStreak: 0, lastFindAt: 0,
+    cursor: { x: 300, y: 220, visible: false },
     hint: null, zone: null, miss: null, lock: 0,
-  });
-  misses = [];
-  layers = [0, 1].map(a => {
-    const c = document.createElement('canvas');
-    c.width = 1200; c.height = 880;
-    const x = c.getContext('2d');
-    x.scale(2, 2);
-    drawScene(x, scenes[level], state.selected, !!a);
-    return c;
-  });
-  update();
+  };
 }
 
-// ---------- screens ----------
-
-function postcardGrid() {
-  return `<div class="postcard-grid">${scenes.map((s, i) => {
-    const locked = i > unlocked;
-    const done = i < unlocked;
-    return `<button class="postcard${locked ? ' locked' : ''}${i === state.level ? ' current' : ''}" data-level="${i}" ${locked ? 'disabled' : ''}>
-      <span class="postcard-num">${String(i + 1).padStart(2, '0')}</span>
-      <span class="postcard-name">${s.name}</span>
-      <span class="postcard-mark">${locked ? 'locked' : done ? '✓ collected' : 'open'}</span>
-    </button>`;
-  }).join('')}</div>`;
-}
-
-function overlay(screen) {
-  state.screen = screen;
-  keys.clear();
-  $('overlay').classList.toggle('hidden', screen === 'playing');
-  $('pause').disabled = screen === 'title' || screen === 'complete' || screen === 'final';
-  const card = $('card');
-
-  if (screen === 'title') {
-    card.innerHTML = `<div class="seal">◎</div>
-      <span class="eyebrow">SIX PLACES. FORTY-TWO LITTLE SECRETS.</span>
-      <h2>See the little<br>things differently.</h2>
-      <p>Welcome to <em>Little Elsewhere.</em><br>Explore six hand-drawn worlds. Find seven changes<br>in each pair of pictures. No rush. Just a closer look.</p>
-      <button class="primary" id="continue">Begin exploring →</button>
-      <p>Or jump straight to a postcard you have unlocked:</p>
-      ${postcardGrid()}
-      <p>Click a changed detail in either picture.</p>
-      <div class="instructions"><kbd>↑ ↓ ← →</kbd> or <kbd>W A S D</kbd> move · <kbd>SHIFT</kbd> faster<br>
-      <kbd>SPACE / ENTER</kbd> check · <kbd>H</kbd> hint · <kbd>P / ESC</kbd> pause<br>
-      <kbd>M</kbd> music · <kbd>N</kbd> sound</div>`;
+class Game {
+  constructor() {
+    this.state = freshState();
+    this.best = 0;
+    this.unlocked = 0;
+    this.soundOn = true;
+    this.musicOn = false;
+    this.audio = null;
+    this.musicStep = 0;
+    this.lastMusicAt = 0;
+    this.recentMisses = [];
+    this.heldKeys = new Set();
+    this.layers = [];
+    this.canvases = [el('original'), el('altered')];
+    this.contexts = this.canvases.map(c => c.getContext('2d'));
+    this.loadProgress();
+    this.wireControls();
   }
 
-  if (screen === 'paused') {
-    card.innerHTML = `<div class="seal">Ⅱ</div>
-      <span class="eyebrow">A MOMENT TO YOURSELF</span>
-      <h2>The world can wait.</h2>
-      <p>Your discoveries are safe.<br>Come back whenever you’re ready.</p>
-      <button class="primary" id="continue">Keep looking →</button>
-      <div class="instructions">Press P, Esc, Enter or Space to resume.</div>`;
+  loadProgress() {
+    try { this.best = Number(localStorage.getItem(BEST_KEY)) || 0; } catch {}
+    try { this.unlocked = Number(localStorage.getItem(UNLOCKED_KEY)) || 0; } catch {}
+    this.unlocked = Math.max(0, Math.min(POSTCARD_COUNT - 1, this.unlocked));
   }
 
-  if (screen === 'complete' || screen === 'final') {
-    const final = screen === 'final';
-    const stars = state.mistakes < 2 && state.hints >= 2 ? 3 : state.mistakes < 5 ? 2 : 1;
-    card.innerHTML = `<div class="stars">${'★'.repeat(stars)}${'☆'.repeat(3 - stars)}</div>
-      <span class="eyebrow">${final ? 'YOUR COLLECTION IS COMPLETE' : 'POSTCARD DISCOVERED'}</span>
-      <h2>${final ? 'A wonderful eye.' : 'Beautifully noticed.'}</h2>
-      <p>${final ? 'Six worlds, forty-two discoveries. Thank you for slowing down.' : scenes[state.level].name + ' has shared all its secrets.'}</p>
-      <div class="result-stats">
-        <div><b>${time(state.elapsed)}</b><span>TIME</span></div>
-        <div><b>${state.mistakes}</b><span>MISTAKES</span></div>
-        <div><b>${state.bestStreak}</b><span>BEST STREAK</span></div>
-        <div><b>${final ? state.total + state.score : state.score}</b><span>${final ? 'TOTAL SCORE' : 'POSTCARD SCORE'}</span></div>
-      </div>
-      ${final ? `<p>Personal best · ${best.toLocaleString()}</p>` : `<p>Finished a postcard: +1 hint for the next one.</p>`}
-      <button class="primary" id="continue">${final ? 'Explore again' : state.level === LEVELS - 1 ? 'View collection' : 'Next postcard'} →</button>
-      <div class="instructions">${final ? 'Every visit reveals a new selection of details.' : `${state.level + 1} of ${LEVELS} postcards collected · Enter to continue`}</div>`;
+  storeUnlocked() {
+    try { localStorage.setItem(UNLOCKED_KEY, String(this.unlocked)); } catch {}
   }
 
-  $('continue')?.addEventListener('click', confirm);
-  card.querySelectorAll('.postcard:not(.locked)').forEach(b => {
-    b.addEventListener('click', () => {
-      wake();
-      state.total = 0;
-      prepare(Number(b.dataset.level));
-      overlay('playing');
-      announce(`Seven differences to discover in ${scenes[state.level].name}.`);
+  storeBest() {
+    try { localStorage.setItem(BEST_KEY, String(this.best)); } catch {}
+  }
+
+  // ---------- audio ----------
+
+  playTone(freq, dur = 0.15, vol = 0.06, kind = 'sine', delay = 0) {
+    if (!this.audio) return;
+    const osc = this.audio.createOscillator();
+    const gain = this.audio.createGain();
+    const at = this.audio.currentTime + delay;
+    osc.type = kind;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(vol, at + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.001, at + dur);
+    osc.connect(gain);
+    gain.connect(this.audio.destination);
+    osc.start(at);
+    osc.stop(at + dur + 0.02);
+  }
+
+  ensureAudio() {
+    if (!this.audio) {
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      if (Ctor) this.audio = new Ctor();
+    }
+    if (this.audio && this.audio.state === 'suspended') this.audio.resume();
+  }
+
+  // ---------- helpers ----------
+
+  say(text) {
+    el('status').textContent = text;
+  }
+
+  clockText(seconds) {
+    const mm = String(Math.floor(seconds / 60)).padStart(2, '0');
+    const ss = String(Math.floor(seconds % 60)).padStart(2, '0');
+    return mm + ':' + ss;
+  }
+
+  // Points for a find: a fast, clean find is worth more, and a streak of
+  // finds without a miss multiplies it. The formula is shown on the
+  // level-complete card so the score is never a mystery.
+  findValue() {
+    const s = this.state;
+    const base = Math.max(150, 500 - Math.floor(s.elapsed) * 2 - s.mistakes * 20);
+    const mult = 1 + 0.25 * Math.min(s.streak, 8);
+    return Math.round(base * mult);
+  }
+
+  refreshHud() {
+    const s = this.state;
+    const scene = scenes[s.level];
+    el('chapter').textContent = 'POSTCARD ' + String(s.level + 1).padStart(2, '0') + ' / ' + String(POSTCARD_COUNT).padStart(2, '0');
+    el('scene-name').textContent = scene.name;
+    el('caption').textContent = scene.caption;
+    el('remaining').textContent = (PER_POSTCARD - s.found.length) + ' left';
+    el('found').textContent = s.found.length + ' OF ' + PER_POSTCARD + ' DISCOVERED';
+    el('time').textContent = this.clockText(s.elapsed);
+    el('mistakes').textContent = s.mistakes;
+    el('score').textContent = (s.total + s.score).toLocaleString();
+    el('streak').textContent = s.streak > 1 ? 'x' + s.streak : '—';
+    el('hints').textContent = s.hints;
+    el('hint').disabled = s.hints === 0 || s.screen !== 'playing';
+    el('progress').innerHTML = Array.from({ length: PER_POSTCARD }, (_, i) =>
+      '<i class="' + (i < s.found.length ? 'done' : '') + '"></i>').join('');
+  }
+
+  // ---------- level setup ----------
+
+  startLevel(level) {
+    const s = this.state;
+    s.level = level;
+    // Spread the seven differences across the picture instead of letting
+    // them clump in one corner.
+    s.selected = pickDifferences(scenes[level], PER_POSTCARD, nextRand);
+    Object.assign(s, {
+      found: [], elapsed: 0, mistakes: 0, hints: 3, score: 0,
+      streak: 0, bestStreak: 0, lastFindAt: 0,
+      hint: null, zone: null, miss: null, lock: 0,
     });
-  });
-  update();
-}
-
-function confirm() {
-  wake();
-  if (state.screen === 'title' || state.screen === 'final') {
-    state.total = 0;
-    prepare(0);
-    overlay('playing');
-    announce('Seven differences to discover.');
-  } else if (state.screen === 'paused') {
-    overlay('playing');
-  } else if (state.screen === 'complete') {
-    if (state.level === LEVELS - 1) {
-      best = Math.max(best, state.total + state.score);
-      saveBest();
-      overlay('final');
-    } else {
-      state.total += state.score;
-      // Finishing a postcard earns a hint for the next one (max five).
-      state.hints = Math.min(5, state.hints + 1);
-      prepare(state.level + 1);
-      overlay('playing');
-    }
-  }
-}
-
-// ---------- playing ----------
-
-function check(x, y) {
-  if (state.screen !== 'playing' || state.lock > 0) return;
-  wake();
-  const target = scenes[state.level].objects.find(o =>
-    state.selected.includes(o.id) &&
-    ((x - o.x) / (o.r + 13)) ** 2 + ((y - (o.y - 8)) / (o.r + 25)) ** 2 <= 1);
-  if (target) {
-    if (state.found.some(f => f.id === target.id)) return;
-    state.found.push({ id: target.id, at: performance.now() });
-    // A find within eight seconds of the previous one extends the streak.
-    if (performance.now() - state.lastFindAt < 8000) state.streak += 1;
-    else state.streak = 1;
-    state.lastFindAt = performance.now();
-    state.bestStreak = Math.max(state.bestStreak, state.streak);
-    state.score += findPoints();
-    if (sound) { tone(659); tone(880, 0.3, 0.05, 'sine', 0.09); }
-    announce(`Found! ${PER_LEVEL - state.found.length} differences remaining.`);
-    if (state.found.length === PER_LEVEL) {
-      state.score += state.hints * 100;
-      // Unlock the next postcard for the level-select grid.
-      if (state.level < LEVELS - 1 && unlocked < state.level + 1) {
-        unlocked = state.level + 1;
-        saveUnlocked();
-      }
-      overlay('complete');
-    }
-  } else {
-    state.mistakes++;
-    state.elapsed += 5;
-    state.score = Math.max(0, state.score - 50);
-    state.streak = 0;
-    state.miss = { x, y, life: 1.1 };
-    misses = misses.filter(t => performance.now() - t < 1600);
-    misses.push(performance.now());
-    if (misses.length >= 3) {
-      state.lock = 2;
-      announce('Take a breath. Clicks paused for two seconds.');
-    } else {
-      announce('Not quite. Five seconds added.');
-    }
-    if (sound) tone(155, 0.18, 0.05, 'triangle');
-  }
-  update();
-}
-
-function hint() {
-  if (state.screen !== 'playing' || !state.hints) return;
-  wake();
-  // If a zone is already glowing, the next hint pinpoints the exact spot.
-  if (state.zone) {
-    const o = scenes[state.level].objects[state.zone.id];
-    state.hint = { id: o.id, life: 4 };
-    state.zone = null;
-    state.hints--;
-    announce(`A hint is glowing on the ${zoneOf(o)}. ${state.hints} hints left.`);
-  } else {
-    // Pick a random unfound difference (never the same one every time),
-    // and first show only its quarter of the picture.
-    const remaining = scenes[state.level].objects.filter(o =>
-      state.selected.includes(o.id) && !state.found.some(f => f.id === o.id));
-    if (!remaining.length) return;
-    const o = remaining[Math.floor(random() * remaining.length)];
-    state.zone = { id: o.id, life: 5 };
-    state.hints--;
-    announce(`Look in the ${zoneOf(o)}. Press H again to pinpoint it. ${state.hints} hints left.`);
-  }
-  if (sound) tone(523, 0.4, 0.04);
-  update();
-}
-
-function pause() {
-  if (state.screen === 'playing') overlay('paused');
-  else if (state.screen === 'paused') overlay('playing');
-}
-
-$('hint').onclick = hint;
-$('pause').onclick = pause;
-
-function toggleSound() {
-  sound = !sound;
-  $('sound').textContent = `Sound ${sound ? 'on' : 'off'}`;
-}
-function toggleMusic() {
-  wake();
-  music = !music;
-  $('music').textContent = `Music ${music ? 'on' : 'off'}`;
-}
-$('sound').onclick = toggleSound;
-$('music').onclick = toggleMusic;
-
-canvases.forEach(c => {
-  function position(e) {
-    const r = c.getBoundingClientRect();
-    state.cursor = {
-      x: (e.clientX - r.left) / r.width * 600,
-      y: (e.clientY - r.top) / r.height * 440,
-      visible: true,
-    };
-  }
-  c.addEventListener('pointermove', position);
-  c.addEventListener('pointerdown', e => { position(e); c.focus(); check(state.cursor.x, state.cursor.y); });
-});
-
-document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) return;
-  const k = e.key.toLowerCase();
-  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'enter', 'escape'].includes(k)) e.preventDefault();
-  keys.add(k);
-  if (e.repeat) return;
-  if (k === 'm') toggleMusic();
-  else if (k === 'n') toggleSound();
-  if (k === 'h') hint();
-  if (k === 'p' || k === 'escape') pause();
-  if (k === ' ' || k === 'enter') {
-    if (state.screen === 'playing') check(state.cursor.x, state.cursor.y);
-    else confirm();
-  }
-});
-document.addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
-window.addEventListener('blur', () => { keys.clear(); if (state.screen === 'playing' && !shot) overlay('paused'); });
-document.addEventListener('visibilitychange', () => { if (document.hidden && state.screen === 'playing' && !shot) overlay('paused'); });
-
-// ---------- rendering ----------
-
-function ring(c, x, y, r, col) {
-  c.lineWidth = 2.5;
-  c.strokeStyle = col;
-  c.beginPath();
-  c.arc(x, y, r, 0, Math.PI * 2);
-  c.stroke();
-}
-
-function render(now) {
-  ctxs.forEach((c, i) => {
-    const canvas = canvases[i];
-    const r = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.round(r.width * dpr);
-    const h = Math.round(r.height * dpr);
-    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-    c.setTransform(w / 600, 0, 0, h / 440, 0, 0);
-    c.drawImage(layers[i], 0, 0, 600, 440);
-
-    // The zone hint: a soft glowing quarter of the picture.
-    if (state.zone) {
-      const o = scenes[state.level].objects[state.zone.id];
-      const zx = o.x < 300 ? 0 : 300;
-      const zy = o.y < 220 ? 0 : 220;
-      const pulse = 0.10 + 0.05 * Math.sin(now / 240);
-      c.fillStyle = `rgba(244, 207, 113, ${pulse})`;
-      c.fillRect(zx, zy, 300, 220);
-      c.strokeStyle = '#f4cf71';
-      c.lineWidth = 2;
-      c.setLineDash([8, 6]);
-      c.strokeRect(zx + 2, zy + 2, 296, 216);
-      c.setLineDash([]);
-    }
-
-    state.found.forEach(f => {
-      const o = scenes[state.level].objects[f.id];
-      const pulse = shot ? 0 : Math.max(0, 1 - (now - f.at) / 450) * 8;
-      ring(c, o.x, o.y - 6, o.r + 15 + pulse, '#fff7d9');
-      ring(c, o.x, o.y - 6, o.r + 12 + pulse, '#2d6b57');
-      c.fillStyle = '#2d6b57';
-      c.beginPath(); c.arc(o.x + o.r + 6, o.y - o.r - 5, 7, 0, 7); c.fill();
-      c.fillStyle = 'white';
-      c.font = '10px Arial'; c.textAlign = 'center';
-      c.fillText('✓', o.x + o.r + 6, o.y - o.r - 2);
+    this.recentMisses = [];
+    this.layers = [0, 1].map(altered => {
+      const c = document.createElement('canvas');
+      c.width = 1200;
+      c.height = 880;
+      const g = c.getContext('2d');
+      g.scale(2, 2);
+      drawScene(g, scenes[level], s.selected, !!altered);
+      return c;
     });
+    this.refreshHud();
+  }
 
-    if (state.hint) {
-      const o = scenes[state.level].objects[state.hint.id];
-      ring(c, o.x, o.y - 8, o.r + 24 + Math.sin(now / 220) * 5, '#ffe7a0');
-      ring(c, o.x, o.y - 8, o.r + 28 + Math.sin(now / 220) * 5, '#f4cf7199');
+  // ---------- screens ----------
+
+  postcardButtons() {
+    const s = this.state;
+    const cards = scenes.map((scene, i) => {
+      const locked = i > this.unlocked;
+      const done = i < this.unlocked;
+      const mark = locked ? 'locked' : done ? '✓ collected' : 'open';
+      return '<button class="postcard' + (locked ? ' locked' : '') + (i === s.level ? ' current' : '') +
+        '" data-level="' + i + '"' + (locked ? ' disabled' : '') + '>' +
+        '<span class="postcard-num">' + String(i + 1).padStart(2, '0') + '</span>' +
+        '<span class="postcard-name">' + scene.name + '</span>' +
+        '<span class="postcard-mark">' + mark + '</span></button>';
+    }).join('');
+    return '<div class="postcard-grid">' + cards + '</div>';
+  }
+
+  showScreen(screen) {
+    const s = this.state;
+    s.screen = screen;
+    this.heldKeys.clear();
+    el('overlay').classList.toggle('hidden', screen === 'playing');
+    el('pause').disabled = screen === 'title' || screen === 'complete' || screen === 'final';
+    const card = el('card');
+
+    if (screen === 'title') {
+      card.innerHTML = '<div class="seal">◎</div>' +
+        '<span class="eyebrow">SIX PLACES. FORTY-TWO LITTLE SECRETS.</span>' +
+        '<h2>See the little<br>things differently.</h2>' +
+        '<p>Welcome to <em>Little Elsewhere.</em><br>Explore six hand-drawn worlds. Find seven changes<br>in each pair of pictures. No rush. Just a closer look.</p>' +
+        '<button class="primary" id="continue">Begin exploring →</button>' +
+        '<p>Or jump straight to a postcard you have unlocked:</p>' +
+        this.postcardButtons() +
+        '<p>Click a changed detail in either picture.</p>' +
+        '<div class="instructions"><kbd>↑ ↓ ← →</kbd> or <kbd>W A S D</kbd> move · <kbd>SHIFT</kbd> faster<br>' +
+        '<kbd>SPACE / ENTER</kbd> check · <kbd>H</kbd> hint · <kbd>P / ESC</kbd> pause<br>' +
+        '<kbd>M</kbd> music · <kbd>N</kbd> sound</div>';
     }
 
-    if (state.miss) {
-      const { x, y } = state.miss;
-      c.strokeStyle = '#c7544b'; c.lineWidth = 3;
-      c.beginPath();
-      c.moveTo(x - 9, y - 9); c.lineTo(x + 9, y + 9);
-      c.moveTo(x + 9, y - 9); c.lineTo(x - 9, y + 9);
-      c.stroke();
+    if (screen === 'paused') {
+      card.innerHTML = '<div class="seal">Ⅱ</div>' +
+        '<span class="eyebrow">A MOMENT TO YOURSELF</span>' +
+        '<h2>The world can wait.</h2>' +
+        '<p>Your discoveries are safe.<br>Come back whenever you’re ready.</p>' +
+        '<button class="primary" id="continue">Keep looking →</button>' +
+        '<div class="instructions">Press P, Esc, Enter or Space to resume.</div>';
     }
 
-    if (state.cursor.visible && state.screen === 'playing') {
-      const { x, y } = state.cursor;
-      c.strokeStyle = '#fff9'; c.lineWidth = 4;
-      c.beginPath(); c.arc(x, y, 9, 0, 7); c.stroke();
-      ring(c, x, y, 9, '#284e49');
-      c.strokeStyle = '#284e49'; c.lineWidth = 1;
-      for (let a = 0; a < 4; a++) {
-        c.save();
-        c.translate(x, y);
-        c.rotate((a * Math.PI) / 2);
-        c.beginPath(); c.moveTo(5, 0); c.lineTo(15, 0); c.stroke();
-        c.restore();
+    if (screen === 'complete' || screen === 'final') {
+      const isFinal = screen === 'final';
+      const stars = s.mistakes < 2 && s.hints >= 2 ? 3 : s.mistakes < 5 ? 2 : 1;
+      const heading = isFinal ? 'A wonderful eye.' : 'Beautifully noticed.';
+      const blurb = isFinal
+        ? 'Six worlds, forty-two discoveries. Thank you for slowing down.'
+        : scenes[s.level].name + ' has shared all its secrets.';
+      const total = isFinal ? s.total + s.score : s.score;
+      const note = isFinal
+        ? 'Personal best · ' + this.best.toLocaleString()
+        : 'Finished a postcard: +1 hint for the next one.';
+      const nextLabel = isFinal ? 'Explore again' : s.level === POSTCARD_COUNT - 1 ? 'View collection' : 'Next postcard';
+      const foot = isFinal
+        ? 'Every visit reveals a new selection of details.'
+        : (s.level + 1) + ' of ' + POSTCARD_COUNT + ' postcards collected · Enter to continue';
+      card.innerHTML = '<div class="stars">' + '★'.repeat(stars) + '☆'.repeat(3 - stars) + '</div>' +
+        '<span class="eyebrow">' + (isFinal ? 'YOUR COLLECTION IS COMPLETE' : 'POSTCARD DISCOVERED') + '</span>' +
+        '<h2>' + heading + '</h2>' +
+        '<p>' + blurb + '</p>' +
+        '<div class="result-stats">' +
+        '<div><b>' + this.clockText(s.elapsed) + '</b><span>TIME</span></div>' +
+        '<div><b>' + s.mistakes + '</b><span>MISTAKES</span></div>' +
+        '<div><b>' + s.bestStreak + '</b><span>BEST STREAK</span></div>' +
+        '<div><b>' + total + '</b><span>' + (isFinal ? 'TOTAL SCORE' : 'POSTCARD SCORE') + '</span></div>' +
+        '</div>' +
+        '<p>' + note + '</p>' +
+        '<button class="primary" id="continue">' + nextLabel + ' →</button>' +
+        '<div class="instructions">' + foot + '</div>';
+    }
+
+    el('continue')?.addEventListener('click', () => this.advance());
+    card.querySelectorAll('.postcard:not(.locked)').forEach(b => {
+      b.addEventListener('click', () => {
+        this.ensureAudio();
+        this.state.total = 0;
+        this.startLevel(Number(b.dataset.level));
+        this.showScreen('playing');
+        this.say('Seven differences to discover in ' + scenes[this.state.level].name + '.');
+      });
+    });
+    this.refreshHud();
+  }
+
+  advance() {
+    this.ensureAudio();
+    const s = this.state;
+    if (s.screen === 'title' || s.screen === 'final') {
+      s.total = 0;
+      this.startLevel(0);
+      this.showScreen('playing');
+      this.say('Seven differences to discover.');
+    } else if (s.screen === 'paused') {
+      this.showScreen('playing');
+    } else if (s.screen === 'complete') {
+      if (s.level === POSTCARD_COUNT - 1) {
+        this.best = Math.max(this.best, s.total + s.score);
+        this.storeBest();
+        this.showScreen('final');
+      } else {
+        s.total += s.score;
+        // Finishing a postcard earns a hint for the next one (max five).
+        s.hints = Math.min(5, s.hints + 1);
+        this.startLevel(s.level + 1);
+        this.showScreen('playing');
       }
     }
-
-    if (state.lock > 0) {
-      c.fillStyle = '#244a4688';
-      c.fillRect(0, 0, 600, 440);
-      c.fillStyle = '#fff';
-      c.font = '19px Georgia'; c.textAlign = 'center';
-      c.fillText('A breath. A second glance.', 300, 220);
-    }
-  });
-}
-
-prepare(0);
-overlay('title');
-
-// Screenshot mode (?shot=play|hint|complete): stage a fixed scene so the
-// pictures are reproducible, then signal readiness.
-if (shot) {
-  if (shot === 'play' || shot === 'hint' || shot === 'complete') {
-    prepare(shot === 'hint' ? 3 : 0);
-    overlay('playing');
-    const count = shot === 'complete' ? 7 : shot === 'play' ? 4 : 2;
-    state.found = state.selected.slice(0, count).map(id => ({ id, at: 0 }));
-    state.elapsed = shot === 'complete' ? 104 : 76;
-    state.score = count * 420;
-    state.cursor = { x: 365, y: 270, visible: true };
-    if (shot === 'hint') {
-      state.hints = 2;
-      state.hint = { id: state.selected[2], life: 99 };
-      state.miss = { x: 325, y: 240, life: 99 };
-      state.mistakes = 1;
-    }
-    if (shot === 'complete') overlay('complete');
-    update();
   }
-  requestAnimationFrame(() => {
-    render(800);
-    requestAnimationFrame(() => { render(800); window.__shotReady = true; });
-  });
-}
 
-let previous = performance.now();
-function frame(now) {
-  const dt = Math.min(0.05, (now - previous) / 1000);
-  previous = now;
-  if (!shot) {
-    if (state.screen === 'playing') {
-      state.elapsed += dt;
-      state.lock = Math.max(0, state.lock - dt);
-      for (const prop of ['hint', 'miss']) {
-        if (state[prop]) {
-          state[prop].life -= dt;
-          if (state[prop].life <= 0) state[prop] = null;
+  // ---------- playing ----------
+
+  probe(x, y) {
+    const s = this.state;
+    if (s.screen !== 'playing' || s.lock > 0) return;
+    this.ensureAudio();
+    const hit = scenes[s.level].objects.find(o =>
+      s.selected.includes(o.id) &&
+      ((x - o.x) / (o.r + 13)) ** 2 + ((y - (o.y - 8)) / (o.r + 25)) ** 2 <= 1);
+    if (hit) {
+      if (s.found.some(f => f.id === hit.id)) return;
+      s.found.push({ id: hit.id, at: performance.now() });
+      // A find within eight seconds of the previous one extends the streak.
+      if (performance.now() - s.lastFindAt < 8000) s.streak += 1;
+      else s.streak = 1;
+      s.lastFindAt = performance.now();
+      s.bestStreak = Math.max(s.bestStreak, s.streak);
+      s.score += this.findValue();
+      if (this.soundOn) {
+        this.playTone(659);
+        this.playTone(880, 0.3, 0.05, 'sine', 0.09);
+      }
+      this.say('Found! ' + (PER_POSTCARD - s.found.length) + ' differences remaining.');
+      if (s.found.length === PER_POSTCARD) {
+        s.score += s.hints * 100;
+        // Unlock the next postcard for the level-select grid.
+        if (s.level < POSTCARD_COUNT - 1 && this.unlocked < s.level + 1) {
+          this.unlocked = s.level + 1;
+          this.storeUnlocked();
+        }
+        this.showScreen('complete');
+      }
+    } else {
+      s.mistakes++;
+      s.elapsed += 5;
+      s.score = Math.max(0, s.score - 50);
+      s.streak = 0;
+      s.miss = { x, y, life: 1.1 };
+      this.recentMisses = this.recentMisses.filter(t => performance.now() - t < 1600);
+      this.recentMisses.push(performance.now());
+      if (this.recentMisses.length >= 3) {
+        s.lock = 2;
+        this.say('Take a breath. Clicks paused for two seconds.');
+      } else {
+        this.say('Not quite. Five seconds added.');
+      }
+      if (this.soundOn) this.playTone(155, 0.18, 0.05, 'triangle');
+    }
+    this.refreshHud();
+  }
+
+  giveHint() {
+    const s = this.state;
+    if (s.screen !== 'playing' || !s.hints) return;
+    this.ensureAudio();
+    // If a zone is already glowing, the next hint pinpoints the exact spot.
+    if (s.zone) {
+      const o = scenes[s.level].objects[s.zone.id];
+      s.hint = { id: o.id, life: 4 };
+      s.zone = null;
+      s.hints--;
+      this.say('A hint is glowing on the ' + zoneOf(o) + '. ' + s.hints + ' hints left.');
+    } else {
+      // Pick a random unfound difference (never the same one every time),
+      // and first show only its quarter of the picture.
+      const remaining = scenes[s.level].objects.filter(o =>
+        s.selected.includes(o.id) && !s.found.some(f => f.id === o.id));
+      if (!remaining.length) return;
+      const o = remaining[Math.floor(nextRand() * remaining.length)];
+      s.zone = { id: o.id, life: 5 };
+      s.hints--;
+      this.say('Look in the ' + zoneOf(o) + '. Press H again to pinpoint it. ' + s.hints + ' hints left.');
+    }
+    if (this.soundOn) this.playTone(523, 0.4, 0.04);
+    this.refreshHud();
+  }
+
+  togglePause() {
+    if (this.state.screen === 'playing') this.showScreen('paused');
+    else if (this.state.screen === 'paused') this.showScreen('playing');
+  }
+
+  toggleSound() {
+    this.soundOn = !this.soundOn;
+    el('sound').textContent = 'Sound ' + (this.soundOn ? 'on' : 'off');
+  }
+
+  toggleMusic() {
+    this.ensureAudio();
+    this.musicOn = !this.musicOn;
+    el('music').textContent = 'Music ' + (this.musicOn ? 'on' : 'off');
+  }
+
+  // ---------- input ----------
+
+  wireControls() {
+    el('hint').onclick = () => this.giveHint();
+    el('pause').onclick = () => this.togglePause();
+    el('sound').onclick = () => this.toggleSound();
+    el('music').onclick = () => this.toggleMusic();
+
+    this.canvases.forEach(c => {
+      const position = e => {
+        const r = c.getBoundingClientRect();
+        this.state.cursor = {
+          x: (e.clientX - r.left) / r.width * PIC_W,
+          y: (e.clientY - r.top) / r.height * PIC_H,
+          visible: true,
+        };
+      };
+      c.addEventListener('pointermove', position);
+      c.addEventListener('pointerdown', e => {
+        position(e);
+        c.focus();
+        this.probe(this.state.cursor.x, this.state.cursor.y);
+      });
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.target.tagName === 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) return;
+      const k = e.key.toLowerCase();
+      if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' ', 'enter', 'escape'].includes(k)) e.preventDefault();
+      this.heldKeys.add(k);
+      if (e.repeat) return;
+      if (k === 'm') this.toggleMusic();
+      else if (k === 'n') this.toggleSound();
+      if (k === 'h') this.giveHint();
+      if (k === 'p' || k === 'escape') this.togglePause();
+      if (k === ' ' || k === 'enter') {
+        if (this.state.screen === 'playing') this.probe(this.state.cursor.x, this.state.cursor.y);
+        else this.advance();
+      }
+    });
+    document.addEventListener('keyup', e => this.heldKeys.delete(e.key.toLowerCase()));
+    window.addEventListener('blur', () => {
+      this.heldKeys.clear();
+      if (this.state.screen === 'playing' && !shotMode) this.showScreen('paused');
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && this.state.screen === 'playing' && !shotMode) this.showScreen('paused');
+    });
+  }
+
+  // ---------- rendering ----------
+
+  drawRing(g, x, y, r, colour) {
+    g.lineWidth = 2.5;
+    g.strokeStyle = colour;
+    g.beginPath();
+    g.arc(x, y, r, 0, Math.PI * 2);
+    g.stroke();
+  }
+
+  paint(now) {
+    const s = this.state;
+    this.contexts.forEach((g, i) => {
+      const canvas = this.canvases[i];
+      const r = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.round(r.width * dpr);
+      const h = Math.round(r.height * dpr);
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      g.setTransform(w / PIC_W, 0, 0, h / PIC_H, 0, 0);
+      g.drawImage(this.layers[i], 0, 0, PIC_W, PIC_H);
+
+      // The zone hint: a soft glowing quarter of the picture.
+      if (s.zone) {
+        const o = scenes[s.level].objects[s.zone.id];
+        const zx = o.x < 300 ? 0 : 300;
+        const zy = o.y < 220 ? 0 : 220;
+        const pulse = 0.10 + 0.05 * Math.sin(now / 240);
+        g.fillStyle = 'rgba(244, 207, 113, ' + pulse + ')';
+        g.fillRect(zx, zy, 300, 220);
+        g.strokeStyle = '#f4cf71';
+        g.lineWidth = 2;
+        g.setLineDash([8, 6]);
+        g.strokeRect(zx + 2, zy + 2, 296, 216);
+        g.setLineDash([]);
+      }
+
+      s.found.forEach(f => {
+        const o = scenes[s.level].objects[f.id];
+        const pulse = shotMode ? 0 : Math.max(0, 1 - (now - f.at) / 450) * 8;
+        this.drawRing(g, o.x, o.y - 6, o.r + 15 + pulse, '#fff7d9');
+        this.drawRing(g, o.x, o.y - 6, o.r + 12 + pulse, '#2d6b57');
+        g.fillStyle = '#2d6b57';
+        g.beginPath();
+        g.arc(o.x + o.r + 6, o.y - o.r - 5, 7, 0, 7);
+        g.fill();
+        g.fillStyle = 'white';
+        g.font = '10px Arial';
+        g.textAlign = 'center';
+        g.fillText('✓', o.x + o.r + 6, o.y - o.r - 2);
+      });
+
+      if (s.hint) {
+        const o = scenes[s.level].objects[s.hint.id];
+        this.drawRing(g, o.x, o.y - 8, o.r + 24 + Math.sin(now / 220) * 5, '#ffe7a0');
+        this.drawRing(g, o.x, o.y - 8, o.r + 28 + Math.sin(now / 220) * 5, '#f4cf7199');
+      }
+
+      if (s.miss) {
+        const { x, y } = s.miss;
+        g.strokeStyle = '#c7544b';
+        g.lineWidth = 3;
+        g.beginPath();
+        g.moveTo(x - 9, y - 9);
+        g.lineTo(x + 9, y + 9);
+        g.moveTo(x + 9, y - 9);
+        g.lineTo(x - 9, y + 9);
+        g.stroke();
+      }
+
+      if (s.cursor.visible && s.screen === 'playing') {
+        const { x, y } = s.cursor;
+        g.strokeStyle = '#fff9';
+        g.lineWidth = 4;
+        g.beginPath();
+        g.arc(x, y, 9, 0, 7);
+        g.stroke();
+        this.drawRing(g, x, y, 9, '#284e49');
+        g.strokeStyle = '#284e49';
+        g.lineWidth = 1;
+        for (let a = 0; a < 4; a++) {
+          g.save();
+          g.translate(x, y);
+          g.rotate((a * Math.PI) / 2);
+          g.beginPath();
+          g.moveTo(5, 0);
+          g.lineTo(15, 0);
+          g.stroke();
+          g.restore();
         }
       }
-      if (state.zone) {
-        state.zone.life -= dt;
-        if (state.zone.life <= 0) state.zone = null;
+
+      if (s.lock > 0) {
+        g.fillStyle = '#244a4688';
+        g.fillRect(0, 0, PIC_W, PIC_H);
+        g.fillStyle = '#fff';
+        g.font = '19px Georgia';
+        g.textAlign = 'center';
+        g.fillText('A breath. A second glance.', 300, 220);
       }
-      const dx = (keys.has('arrowright') || keys.has('d') ? 1 : 0) - (keys.has('arrowleft') || keys.has('a') ? 1 : 0);
-      const dy = (keys.has('arrowdown') || keys.has('s') ? 1 : 0) - (keys.has('arrowup') || keys.has('w') ? 1 : 0);
-      if (dx || dy) {
-        state.cursor.visible = true;
-        const speed = keys.has('shift') ? 260 : 110;
-        state.cursor.x = Math.max(0, Math.min(600, state.cursor.x + dx * speed * dt));
-        state.cursor.y = Math.max(0, Math.min(440, state.cursor.y + dy * speed * dt));
-      }
-      $('time').textContent = time(state.elapsed);
-    }
-    if (music && audio && state.screen === 'playing' && now - lastMusic > 480) {
-      lastMusic = now;
-      const notes = [261.63, 329.63, 392, 493.88, 440, 392, 329.63, 293.66];
-      tone(notes[note++ % 8] / 2, 0.8, 0.018);
-      tone(notes[(note + 2) % 8], 0.7, 0.012);
-    }
-    render(now);
+    });
   }
-  requestAnimationFrame(frame);
+
+  // ---------- main loop ----------
+
+  tick(now, previous) {
+    const s = this.state;
+    const dt = Math.min(0.05, (now - previous) / 1000);
+    if (!shotMode) {
+      if (s.screen === 'playing') {
+        s.elapsed += dt;
+        s.lock = Math.max(0, s.lock - dt);
+        for (const prop of ['hint', 'miss']) {
+          if (s[prop]) {
+            s[prop].life -= dt;
+            if (s[prop].life <= 0) s[prop] = null;
+          }
+        }
+        if (s.zone) {
+          s.zone.life -= dt;
+          if (s.zone.life <= 0) s.zone = null;
+        }
+        const dx = (this.heldKeys.has('arrowright') || this.heldKeys.has('d') ? 1 : 0) -
+          (this.heldKeys.has('arrowleft') || this.heldKeys.has('a') ? 1 : 0);
+        const dy = (this.heldKeys.has('arrowdown') || this.heldKeys.has('s') ? 1 : 0) -
+          (this.heldKeys.has('arrowup') || this.heldKeys.has('w') ? 1 : 0);
+        if (dx || dy) {
+          s.cursor.visible = true;
+          const speed = this.heldKeys.has('shift') ? 260 : 110;
+          s.cursor.x = Math.max(0, Math.min(PIC_W, s.cursor.x + dx * speed * dt));
+          s.cursor.y = Math.max(0, Math.min(PIC_H, s.cursor.y + dy * speed * dt));
+        }
+        el('time').textContent = this.clockText(s.elapsed);
+      }
+      if (this.musicOn && this.audio && s.screen === 'playing' && now - this.lastMusicAt > 480) {
+        this.lastMusicAt = now;
+        const notes = [261.63, 329.63, 392, 493.88, 440, 392, 329.63, 293.66];
+        this.playTone(notes[this.musicStep++ % 8] / 2, 0.8, 0.018);
+        this.playTone(notes[(this.musicStep + 2) % 8], 0.7, 0.012);
+      }
+      this.paint(now);
+    }
+  }
+
+  boot() {
+    this.startLevel(0);
+    this.showScreen('title');
+
+    // Screenshot mode (?shot=play|hint|complete): stage a fixed scene so
+    // the pictures are reproducible, then signal readiness.
+    if (shotMode) {
+      if (shotMode === 'play' || shotMode === 'hint' || shotMode === 'complete') {
+        this.startLevel(shotMode === 'hint' ? 3 : 0);
+        this.showScreen('playing');
+        const count = shotMode === 'complete' ? 7 : shotMode === 'play' ? 4 : 2;
+        const s = this.state;
+        s.found = s.selected.slice(0, count).map(id => ({ id, at: 0 }));
+        s.elapsed = shotMode === 'complete' ? 104 : 76;
+        s.score = count * 420;
+        s.cursor = { x: 365, y: 270, visible: true };
+        if (shotMode === 'hint') {
+          s.hints = 2;
+          s.hint = { id: s.selected[2], life: 99 };
+          s.miss = { x: 325, y: 240, life: 99 };
+          s.mistakes = 1;
+        }
+        if (shotMode === 'complete') this.showScreen('complete');
+        this.refreshHud();
+      }
+      requestAnimationFrame(() => {
+        this.paint(800);
+        requestAnimationFrame(() => {
+          this.paint(800);
+          window.__shotReady = true;
+        });
+      });
+    }
+
+    let previous = performance.now();
+    const frame = now => {
+      this.tick(now, previous);
+      previous = now;
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }
 }
-requestAnimationFrame(frame);
+
+const game = new Game();
+game.boot();
 
 // Read-only test surface: no action shortcuts or answer overlays in the game.
 window.__game = {
-  get state() { return JSON.parse(JSON.stringify(state)); },
+  get state() { return JSON.parse(JSON.stringify(game.state)); },
   get differences() {
-    return scenes[state.level].objects
-      .filter(o => state.selected.includes(o.id))
+    return scenes[game.state.level].objects
+      .filter(o => game.state.selected.includes(o.id))
       .map(o => ({ ...o }));
   },
-  get unlocked() { return unlocked; },
-  get levels() { return LEVELS; },
+  get unlocked() { return game.unlocked; },
+  get levels() { return POSTCARD_COUNT; },
 };
